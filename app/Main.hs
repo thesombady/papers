@@ -13,11 +13,12 @@ import System.FilePath ( (</>) )
 import Toml ( TomlCodec, (.=) )
 import qualified Toml
 import Data.Text ( Text )
+import Data.Maybe ( fromMaybe )
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Process (spawnProcess, callCommand)
 import System.Environment (lookupEnv)
-import System.Info ( os ) 
+import System.Info ( os )
 import Options.Applicative
 import Text.Parsec.String (parseFromFile)
 import qualified Text.BibTeX.Parse as BibParse
@@ -29,6 +30,7 @@ data Context
   | Add FilePath FilePath -- (pdf, bib, projects)
   | Extract [Text]
   | Edit
+  | Info Text
   -- Edit Text (open meta.toml at the line number in $EDITOR)
   deriving Show
 
@@ -40,6 +42,7 @@ optionParser =
    <> command "open"    (info openParser    (progDesc "Open a single entry in `$PDF_VIEWER`"))
    <> command "list"    (info listParser    (progDesc "List all entries"))
    <> command "edit"    (info editParser    (progDesc "Edit the metafile in $EDITOR or vi"))
+   <> command "info"    (info infoParser'   (progDesc "Obtain information about the query result"))
     )
 
 extractParser :: Parser Context
@@ -48,6 +51,13 @@ extractParser =
     ( metavar "Items..."
    <> help "Entries to extract"
     ))
+
+infoParser' :: Parser Context
+infoParser' =
+  Info <$> strArgument
+    ( metavar "Item"
+   <> help "Query to info"
+    )
 
 editParser :: Parser Context
 editParser = pure Edit
@@ -166,8 +176,9 @@ extractBib fp = do
       (Just t, Just a) -> pure (t, a)
       (_, _)           -> die "Missing field/s (title or author)"
 
-  pure (T.pack key', T.replace "\n" " " $ T.replace "\t" " " (T.pack title')
-        , T.pack author')
+  pure  (T.pack key'
+        , trim (T.pack title')
+        , trim (T.pack author'))
 
 createEntry :: FilePath -> FilePath -> FilePath -> IO Entry
 createEntry base pdfsrc bibsrc = do
@@ -265,6 +276,34 @@ extractEntry es xs = do
   else
     die "No entries found."
 
+trim :: Text -> Text
+trim = T.unwords . T.words . T.replace "\n\t" ""
+
+infoEntry :: [Entry] -> Text -> IO ()
+infoEntry es xs = do
+  home <- getHomeDirectory
+  let base = home </> ".Papers/"
+  let matches = nub $ matchEntries xs es
+      files   = [ bibDest base entry.key
+                | entry <- matches]
+  fp <- case files of
+    [f] -> pure f
+    _   -> die $ "Multiple results for: " ++ T.unpack xs
+  bib <- parseBib fp
+  let title  = trim $ T.pack $
+                  fromMaybe "Unknown" (getField "title" bib)
+      author = trim $ T.pack $
+                  fromMaybe "Unknown" (getField "author" bib)
+      abstract = getField "abstract" bib
+  TIO.putStrLn $ "Type: "   <> T.pack bib.entryType
+  TIO.putStrLn $ "Author: " <> author
+  TIO.putStrLn $ "Title: "  <> title
+  case abstract of
+    Nothing -> pure ()
+    Just abs'  -> do
+      TIO.putStrLn $ "Abstract: "
+        <> T.intercalate ".\n" (T.splitOn ". " (trim (T.pack abs')))
+
 editEntry :: FilePath -> IO ()
 editEntry base = do
   editor <- lookupEnv "EDITOR"
@@ -302,6 +341,7 @@ main = do
     Open query      -> openEntry stmts query
     Extract query   -> extractEntry stmts query
     Edit            -> editEntry base
+    Info query      -> infoEntry stmts query
     Add pdfpath bibpath -> do
       entry <- createEntry base pdfpath bibpath
       let contains' = entry `elem` stmts
