@@ -11,3 +11,9 @@ Changed:
 about a specific entry.
 - Added trimming to remove oddly formatted titles and authors. Splitting on newlines,
 tabs, and multiple spaces. Easier to read output for `papers list`.
+
+## 0.1.2.0 -- 2026-01-27
+
+Added:
+- Added `--doi` option for adding entries, such that one can utilize
+  `papers add somepdf.pdf --doi 10.2013/xxxxx`

@@ -7,7 +7,8 @@ import System.Directory
   ( doesFileExist
   , getHomeDirectory
   , copyFile
-  , createDirectoryIfMissing)
+  , createDirectoryIfMissing
+  , removeFile)
 import System.Exit (die)
 import System.FilePath ( (</>) )
 import Toml ( TomlCodec, (.=) )
@@ -16,7 +17,7 @@ import Data.Text ( Text )
 import Data.Maybe ( fromMaybe )
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import System.Process (spawnProcess, callCommand)
+import System.Process (spawnProcess, callCommand, readCreateProcess, shell)
 import System.Environment (lookupEnv)
 import System.Info ( os )
 import Options.Applicative
@@ -24,10 +25,17 @@ import Text.Parsec.String (parseFromFile)
 import qualified Text.BibTeX.Parse as BibParse
 import qualified Text.BibTeX.Entry as Bib
 
+type DOI = Text
+
+data AddSource
+  = FromBib FilePath
+  | FromDOI DOI
+  deriving Show
+
 data Context
   = List
   | Open Text
-  | Add FilePath FilePath -- (pdf, bib, projects)
+  | Add FilePath AddSource -- (pdf, bib, projects)
   | Extract [Text]
   | Edit
   | Info Text
@@ -69,10 +77,20 @@ addParser =
         ( metavar "Source"
        <> help "Pdf source file"
         )
-    <*> strArgument
-        ( metavar "Source"
-       <> help "Bibtex source file"
+    <*> addSourceParser
+
+addSourceParser :: Parser AddSource
+addSourceParser =
+      FromBib <$> strArgument
+        ( metavar "BIB"
+       <> help "BibTeX source file"
         )
+  <|> FromDOI <$> option str
+        ( long "doi"
+       <> metavar "DOI"
+       <> help "Fetch BibTeX from DOI"
+        )
+
 
 openParser :: Parser Context
 openParser =
@@ -180,11 +198,37 @@ extractBib fp = do
         , trim (T.pack title')
         , trim (T.pack author'))
 
-createEntry :: FilePath -> FilePath -> FilePath -> IO Entry
-createEntry base pdfsrc bibsrc = do
+fetchBibFromDoi :: DOI -> IO Text
+fetchBibFromDoi doi = do
+  let cmd = "curl -fsSL -H 'Accept: application/x-bibtex' https://doi.org/"
+              <> T.unpack doi
+  out <- readCreateProcess (shell cmd) ""
+  if null out
+    then die $ "FAILED to fetch BibTex from DOI: " <> T.unpack doi
+    else pure (T.pack out)
+
+createEntry :: FilePath -> FilePath -> AddSource -> IO Entry
+createEntry base pdfsrc (FromBib bibsrc) = do
   ensure pdfsrc
   (key, title, author) <- extractBib bibsrc
   (pdfdest, bibdest) <- copyIntoLibrary base pdfsrc bibsrc key
+  pure Entry
+    { key = key
+    , pdfPath = T.pack pdfdest
+    , bibPath = T.pack bibdest
+    , authors = author
+    , title = title
+    , keywords = []
+    , projects = []
+    }
+createEntry base pdfsrc (FromDOI doi) = do
+  ensure pdfsrc
+  bibsrc <- fetchBibFromDoi doi
+  TIO.writeFile "temp_file.bib" bibsrc
+  (key, title, author) <- extractBib "temp_file.bib"
+  TIO.putStrLn $ "Generated key: " <>  key
+  (pdfdest, bibdest) <- copyIntoLibrary base pdfsrc "temp_file.bib" key
+  removeFile "temp_file.bib"
   pure Entry
     { key = key
     , pdfPath = T.pack pdfdest
@@ -212,7 +256,7 @@ openEntry :: [Entry] -> Text -> IO ()
 openEntry es query = do
   let matches = matchEntries query es
   case matches of
-    []  -> die $ "No matches for:" <> T.unpack query
+    []  -> die $ "No matches for: " <> T.unpack query
     [e] -> openPdf (T.unpack e.pdfPath)
     _   -> die $ "Multiple matches for: " <> T.unpack query
   -- if length matches > 1 then error $ "Multiply matches for: " ++ T.unpack query
@@ -280,22 +324,34 @@ trim :: Text -> Text
 trim = T.unwords . T.words . T.replace "\n\t" ""
 
 infoEntry :: [Entry] -> Text -> IO ()
-infoEntry es xs = do
+infoEntry es query = do
   home <- getHomeDirectory
   let base = home </> ".Papers/"
-  let matches = nub $ matchEntries xs es
-      files   = [ bibDest base entry.key
-                | entry <- matches]
-  fp <- case files of
-    [f] -> pure f
-    _   -> die $ "Multiple results for: " ++ T.unpack xs
+  let matches = nub $ matchEntries query es
+
+  match <- case matches of
+        [s] -> pure s
+        _   -> die $ "Multiple results for: " ++ T.unpack query
+
+  let fp = bibDest base match.key
   bib <- parseBib fp
+
   let title  = trim $ T.pack $
                   fromMaybe "Unknown" (getField "title" bib)
       author = trim $ T.pack $
                   fromMaybe "Unknown" (getField "author" bib)
       abstract = getField "abstract" bib
+
   TIO.putStrLn $ "Type: "   <> T.pack bib.entryType
+
+  case match.projects of
+    (_:_) -> TIO.putStrLn $ "Projects: " <> T.intercalate ", " match.projects
+    []    -> pure ()
+
+  case match.keywords of
+    (_:_) -> TIO.putStrLn $ "Keywords: "  <> T.intercalate ", " match.keywords
+    []    -> pure ()
+
   TIO.putStrLn $ "Author: " <> author
   TIO.putStrLn $ "Title: "  <> title
   case abstract of
