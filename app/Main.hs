@@ -45,12 +45,12 @@ data Context
 optionParser :: Parser Context
 optionParser =
   hsubparser
-    ( command "extract" (info extractParser (progDesc "Extract entries and cat to stdout"))
-   <> command "add"     (info addParser     (progDesc "Add a pdf-bibtex pair"))
-   <> command "open"    (info openParser    (progDesc "Open a single entry in `$PDF_VIEWER`"))
-   <> command "list"    (info listParser    (progDesc "List all entries"))
-   <> command "edit"    (info editParser    (progDesc "Edit the metafile in $EDITOR or vi"))
-   <> command "info"    (info infoParser'   (progDesc "Obtain information about the query result"))
+    ( command "extract"  (info extractParser (progDesc "Extract entries and cat to stdout"))
+    <> command "add"     (info addParser     (progDesc "Add a pdf-bibtex pair"))
+    <> command "open"    (info openParser    (progDesc "Open a single entry in `$PDF_VIEWER`"))
+    <> command "list"    (info listParser    (progDesc "List all entries"))
+    <> command "edit"    (info editParser    (progDesc "Edit the metafile in $EDITOR or vi"))
+    <> command "info"    (info infoParser'   (progDesc "Obtain information about the query result"))
     )
 
 extractParser :: Parser Context
@@ -254,7 +254,7 @@ openPdf fp = do
 
 openEntry :: [Entry] -> Text -> IO ()
 openEntry es query = do
-  let matches = matchEntries query es
+  let matches = nub $ matchEntries query es
   case matches of
     []  -> die $ "No matches for: " <> T.unpack query
     [e] -> openPdf (T.unpack e.pdfPath)
@@ -310,7 +310,9 @@ extractEntry :: [Entry] -> [Text] -> IO ()
 extractEntry es xs = do
   home <- getHomeDirectory
   let base = home </> ".Papers/"
-  let matches = nub $ concatMap (flip matchEntries es) xs
+  let matches = if xs == ["--all"]
+                then es
+                else nub $ concatMap (flip matchEntries es) xs
       files = [ bibDest base entry.key
               | entry <- matches]
   cats <- mapM TIO.readFile files
