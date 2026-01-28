@@ -32,8 +32,14 @@ data AddSource
   | FromDOI DOI
   deriving Show
 
+data ListFilter
+  = AuthorFilter Text
+  | ProjectFilter Text
+  | NoFilter
+  deriving Show
+
 data Context
-  = List
+  = List ListFilter
   | Open Text
   | Add FilePath AddSource -- (pdf, bib, projects)
   | Extract [Text]
@@ -100,7 +106,21 @@ openParser =
     )
 
 listParser :: Parser Context
-listParser = pure List
+listParser = List <$> listParserFilter
+              <|> pure (List NoFilter)
+
+listParserFilter :: Parser ListFilter
+listParserFilter =
+  AuthorFilter <$> option str
+    (long "author"
+    <> metavar "Author"
+    <> help "Specific author to list"
+    )
+  <|> ProjectFilter <$> option str
+    (long "project"
+    <> metavar "Project"
+    <> help "Specify project to list"
+    )
 
 ctxInfo :: ParserInfo Context
 ctxInfo =
@@ -280,10 +300,19 @@ formatRow keyW titleW projectW e =
   where
     comma = T.intercalate ", "
 
-listEntry :: [Entry] -> IO ()
-listEntry es = do
-  let maxKey = maximum [T.length e.key | e <- es] + 1
-      es'  = sortOn key es
+filterEntries :: [Entry] -> ListFilter -> [Entry]
+filterEntries es NoFilter = es
+filterEntries es (ProjectFilter query)
+  = filter (\e -> T.toCaseFold query `elem` map T.toCaseFold e.projects) es
+filterEntries es (AuthorFilter query)
+  = filter (\e -> infix' e.authors) es
+  where
+    infix'  q = T.toCaseFold query `T.isInfixOf` T.toCaseFold q
+
+listEntry :: [Entry] -> ListFilter -> IO ()
+listEntry es filter' = do
+  let maxKey = maximum (1 : [T.length e.key | e <- es]) + 1
+      es'  = sortOn key (filterEntries es filter')
       rows = map (formatRow maxKey 60 15) es'
   TIO.putStrLn "  Reference list  "
   TIO.putStrLn $
@@ -292,7 +321,6 @@ listEntry es = do
     <> padRight 1 "Projects"
   TIO.putStrLn $ T.replicate (maxKey + 60 + 15) "="
   TIO.putStrLn $ T.intercalate "\n" rows
-
 
 pdfDir :: FilePath -> FilePath
 pdfDir base = base </> "pdfs"
@@ -395,7 +423,7 @@ main = do
                 Right entries -> pure entries
   ctx <- execParser ctxInfo
   case ctx of
-    List            -> listEntry stmts
+    List filter'    -> listEntry stmts filter'
     Open query      -> openEntry stmts query
     Extract query   -> extractEntry stmts query
     Edit            -> editEntry base
