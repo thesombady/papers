@@ -38,11 +38,17 @@ data ListFilter
   | NoFilter
   deriving Show
 
+data ExtractFilter
+  = ExtractProject Text
+  | ExtractEntries [Text]
+  | ExtractAll
+  deriving Show
+
 data Context
   = List ListFilter
   | Open Text
   | Add FilePath AddSource -- (pdf, bib, projects)
-  | Extract [Text]
+  | Extract ExtractFilter
   | Edit
   | Info Text
   -- Edit Text (open meta.toml at the line number in $EDITOR)
@@ -60,8 +66,20 @@ optionParser =
     )
 
 extractParser :: Parser Context
-extractParser =
-  Extract <$> some (strArgument
+extractParser = Extract <$> extractParserFilter
+
+extractParserFilter :: Parser ExtractFilter
+extractParserFilter =
+  flag' ExtractAll
+    ( long "all"
+    <> help "Extract all entries"
+    )
+  <|> ExtractProject <$> option str
+    (long "project"
+    <> metavar "Project"
+    <> help "Specific Project to list"
+    )
+  <|> ExtractEntries <$> some (strArgument
     ( metavar "Items..."
    <> help "Entries to extract"
     ))
@@ -96,7 +114,6 @@ addSourceParser =
        <> metavar "DOI"
        <> help "Fetch BibTeX from DOI"
         )
-
 
 openParser :: Parser Context
 openParser =
@@ -231,6 +248,7 @@ createEntry :: FilePath -> FilePath -> AddSource -> IO Entry
 createEntry base pdfsrc (FromBib bibsrc) = do
   ensure pdfsrc
   (key, title, author) <- extractBib bibsrc
+  -- TODO CRITITAL: Make sure that no entry already exists with the key.
   (pdfdest, bibdest) <- copyIntoLibrary base pdfsrc bibsrc key
   pure Entry
     { key = key
@@ -244,6 +262,7 @@ createEntry base pdfsrc (FromBib bibsrc) = do
 createEntry base pdfsrc (FromDOI doi) = do
   ensure pdfsrc
   bibsrc <- fetchBibFromDoi doi
+  -- TODO CRITICAL: Make sure that no entry already exists with the key.
   TIO.writeFile "temp_file.bib" bibsrc
   (key, title, author) <- extractBib "temp_file.bib"
   TIO.putStrLn $ "Generated key: " <>  key
@@ -301,14 +320,14 @@ formatRow keyW titleW projectW e =
     comma = T.intercalate ", "
 
 filterEntries :: [Entry] -> ListFilter -> [Entry]
-filterEntries es NoFilter = es
-filterEntries es (ProjectFilter query)
-  = filter (\e -> T.toCaseFold query `elem` map T.toCaseFold e.projects) es
-filterEntries es (AuthorFilter query)
-  = filter (\e -> infix' e.authors) es
-  where
-    infix'  q = T.toCaseFold query `T.isInfixOf` T.toCaseFold q
-
+filterEntries es filter'
+  = case filter' of
+      NoFilter -> es
+      ProjectFilter query ->
+        filter (\e -> T.toCaseFold query `elem` map T.toCaseFold e.projects) es
+      AuthorFilter query ->
+        filter (\e -> T.toCaseFold query `T.isInfixOf` T.toCaseFold e.authors) es
+    
 listEntry :: [Entry] -> ListFilter -> IO ()
 listEntry es filter' = do
   let maxKey = maximum (1 : [T.length e.key | e <- es]) + 1
@@ -334,13 +353,14 @@ pdfDest base key = pdfDir base </> T.unpack key <> ".pdf"
 bibDest :: FilePath -> Text -> FilePath
 bibDest base key = bibDir base </> T.unpack key <> ".bib"
 
-extractEntry :: [Entry] -> [Text] -> IO ()
-extractEntry es xs = do
+extractEntry :: [Entry] -> ExtractFilter -> IO ()
+extractEntry es query = do
   home <- getHomeDirectory
   let base = home </> ".Papers/"
-  let matches = if xs == ["--all"]
-                then es
-                else nub $ concatMap (flip matchEntries es) xs
+  let matches = case query of
+          ExtractEntries queries -> nub $ concatMap (flip matchEntries es) queries
+          ExtractAll             -> es
+          ExtractProject query'  -> filterEntries es (ProjectFilter query')
       files = [ bibDest base entry.key
               | entry <- matches]
   cats <- mapM TIO.readFile files
