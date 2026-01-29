@@ -310,14 +310,17 @@ truncateText n s
 padRight :: Int -> Text -> Text
 padRight n t = t <> T.replicate (max 0 (n - T.length t)) " "
 
-formatRow :: Int -> Int -> Int -> Entry -> Text
-formatRow keyW titleW projectW e =
+formatRow :: Int -> Int -> Int -> Int -> Entry -> Text
+formatRow keyW titleW projectW keywordsW e =
   padRight keyW (truncateText keyW e.key) <> "  " <>
-  padRight titleW (truncateText titleW e.title) <>
-  (if null e.projects then ""
-    else T.pack "  [" <> truncateText projectW (comma e.projects) <> "]")
+  padRight titleW (truncateText titleW e.title) <> "  " <>
+  padRight projectW  (truncateText projectW proj) <> "  " <>
+  padRight keywordsW keys
   where
-    comma = T.intercalate ", "
+    proj = if null e.projects then "    "
+           else T.pack "[" <> truncateText (projectW - 2) (T.intercalate ", " e.projects) <> "]"
+    keys = if null e.keywords then ""
+           else T.pack "[" <> truncateText keywordsW (T.intercalate ", " e.keywords) <> "]"
 
 filterEntries :: [Entry] -> ListFilter -> [Entry]
 filterEntries es filter'
@@ -327,18 +330,19 @@ filterEntries es filter'
         filter (\e -> T.toCaseFold query `elem` map T.toCaseFold e.projects) es
       AuthorFilter query ->
         filter (\e -> T.toCaseFold query `T.isInfixOf` T.toCaseFold e.authors) es
-    
+
 listEntry :: [Entry] -> ListFilter -> IO ()
 listEntry es filter' = do
   let maxKey = maximum (1 : [T.length e.key | e <- es]) + 1
       es'  = sortOn key (filterEntries es filter')
-      rows = map (formatRow maxKey 60 15) es'
+      rows = map (formatRow maxKey 60 15 15) es'
   TIO.putStrLn "  Reference list  "
   TIO.putStrLn $
     padRight (maxKey + 2) "Key"
     <> padRight 62 "Title"
-    <> padRight 1 "Projects"
-  TIO.putStrLn $ T.replicate (maxKey + 60 + 15) "="
+    <> padRight 17 "Projects"
+    <> padRight 1 "Keywords"
+  TIO.putStrLn $ T.replicate (maxKey + 60 + 15 * 2 + 8) "="
   TIO.putStrLn $ T.intercalate "\n" rows
 
 pdfDir :: FilePath -> FilePath

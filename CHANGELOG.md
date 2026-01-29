@@ -23,3 +23,7 @@ Added:
 Added:
 - Added extract filters, possibility of extracting per project or everything.
 - Added list filters (author and project).
+
+## 0.1.4.0 -- 2026-01-29
+
+Formatted the `list` command to include keywords.
