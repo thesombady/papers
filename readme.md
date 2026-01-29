@@ -13,3 +13,6 @@ and add it to your path, or modify the install script.
 It also relies on two environment variables `$EDITOR` and `$PDF_VIEWER`; these has to
 set for the environment, if they are not open `vi` and/or your system determined
 application will be used instead.
+
+# Dependencies
+Other than Cabal, `curl` has to be installed in order to use the `--doi` option on adding files.

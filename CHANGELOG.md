@@ -17,3 +17,9 @@ tabs, and multiple spaces. Easier to read output for `papers list`.
 Added:
 - Added `--doi` option for adding entries, such that one can utilize
   `papers add somepdf.pdf --doi 10.2013/xxxxx`
+
+## 0.1.3.0 -- 2026-01-29
+
+Added:
+- Added extract filters, possibility of extracting per project or everything.
+- Added list filters (author and project).
