@@ -27,3 +27,13 @@ Added:
 ## 0.1.4.0 -- 2026-01-29
 
 Formatted the `list` command to include keywords.
+
+## 0.1.5.0 -- 2026-01-30
+
+Fixed a logical error where the key was not renamed in the bib entry when renaming
+an entry in the library.
+
+Added:
+- Alias get -> extract
+- Alias mv  -> rename
+- Alias rm  -> remove
