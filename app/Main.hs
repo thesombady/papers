@@ -42,7 +42,7 @@ type DOI = Text
 -- RELEASE: 0.5.0. Add `add --library pdfFolder library.bib`
 
 data AddSource
-  = FromBib FilePath
+  = FromRaw FilePath
   | FromDOI DOI
   deriving Show
 
@@ -68,6 +68,7 @@ data Context
   | Add (Maybe FilePath) AddSource -- (pdf, bib, projects)
   | Extract ExtractFilter
   | Edit
+  | Attatch Text AddSource
   | Info Text
   | Rename Text Text
   | Remove Bool Text
@@ -81,6 +82,7 @@ optionParser =
     <> command "add"     (info addParser     (progDesc "Add a pdf-bibtex pair"))
     <> command "open"    (info openParser    (progDesc "Open a single entry in `$PDF_VIEWER`"))
     <> command "list"    (info listParser    (progDesc "List all entries"))
+    <> command "attatch" (info attatchParser (progDesc "Attatch a pdf to an existing entry"))
     <> command "ls"      (info listParser    (progDesc "List all entries -- alias for list"))
     <> command "edit"    (info editParser    (progDesc "Edit the metafile in $EDITOR or vi"))
     <> command "info"    (info infoParser'   (progDesc "Obtain information about the query result"))
@@ -94,67 +96,42 @@ extractParser :: Parser Context
 extractParser = Extract <$> extractParserFilter
 
 removeParser :: Parser Context
-removeParser =
-  Remove
-    <$> switch
-        ( long "force"
-       <> help "Forcefully remove the item"
-        )
-    <*> (T.pack <$> strArgument
-        ( metavar "ITEM"
-       <> help "Key/query to remove"
-        ))
+removeParser = Remove <$>
+  switch ( long "force" <> help "Forcefully remove the item" )
+  <*> (T.pack <$> strArgument ( metavar "ITEM" <> help "Key/query to remove" ))
 
 extractParserFilter :: Parser ExtractFilter
-extractParserFilter =
-      flag' ExtractAll
-        ( long "all"
-       <> help "Extract all entries"
-        )
-  <|> ExtractFilter <$> entryFilterParser
+extractParserFilter = flag' ExtractAll ( long "all" <> help "Extract all entries" )
+                      <|> ExtractFilter <$> entryFilterParser
 
 entryFilterParser :: Parser Filter
-entryFilterParser =
-  ByProject <$> option str
-        ( long "project"
-       <> metavar "PROJECT"
-       <> help "Filter by project"
-        )
+entryFilterParser = ByProject <$>
+  option str ( long "project" <> metavar "PROJECT" <> help "Filter by project")
   <|> ByAuthor <$> option str
-        ( long "author"
-       <> metavar "AUTHOR"
-       <> help "Filter by author substring"
-        )
+        ( long "author" <> metavar "AUTHOR" <> help "Filter by author substring" )
   <|> ByQuery <$> some (strArgument
-        ( metavar "ITEMS..."
-       <> help "Keys/queries to match"
-        ))
+        ( metavar "ITEMS..." <> help "achs_jacsat118_9360.bibKeys/queries to match" ))
 
 infoParser' :: Parser Context
-infoParser' =
-  Info <$> strArgument
-    ( metavar "Item"
-   <> help "Query to info"
-    )
+infoParser' = Info <$> strArgument ( metavar "Item" <> help "Query to info" )
 
 renameParser :: Parser Context
-renameParser =
-  Rename <$> strArgument
-    ( metavar "Item"
-   <> help "Query to rename"
-    )
-  <*> strArgument
-    (metavar "Item"
-    <> help "New key"
-    )
+renameParser = Rename <$>
+  strArgument ( metavar "Item" <> help "Query to rename" )
+  <*> strArgument ( metavar "Item" <> help "New key" )
+
+attatchParser :: Parser Context
+attatchParser = Attatch <$>
+  strArgument ( metavar "Item"  <> help "Query to attatch to" )
+  <*> (
+      FromRaw <$> strArgument (metavar "PDF" <> help "PDF source file")
+  <|> FromDOI <$> option str (long "doi" <> metavar "DOI" <> help "Fetch PDF using DOI if possible"))
 
 editParser :: Parser Context
 editParser = pure Edit
 
 addParser :: Parser Context
-addParser =
-      onlyBibMode
-  <|> pdfMode
+addParser = onlyBibMode <|> pdfMode
   where
     onlyBibMode :: Parser Context
     onlyBibMode =
@@ -162,13 +139,9 @@ addParser =
 
     pdfMode :: Parser Context
     pdfMode =
-      (Add . Just <$> strArgument
-              ( metavar "PDF"
-             <> help "PDF source file"
-              ))
+      (Add . Just <$> strArgument ( metavar "PDF" <> help "PDF source file" ))
         <*> addSourceParser
 
-    -- IMPORTANT: use flag' so this branch only activates when flag is present
     onlyBibFlag :: Parser ()
     onlyBibFlag =
       flag' ()
@@ -179,15 +152,11 @@ addParser =
 
 addSourceParser :: Parser AddSource
 addSourceParser =
-      FromBib <$> strArgument (metavar "BIB" <> help "BibTeX source file")
+      FromRaw <$> strArgument (metavar "BIB" <> help "BibTeX source file")
   <|> FromDOI <$> option str (long "doi" <> metavar "DOI" <> help "Fetch BibTeX from DOI")
 
 openParser :: Parser Context
-openParser =
-  Open <$> strArgument
-    ( metavar "Item"
-    <> help "Entry to open"
-    )
+openParser = Open <$> strArgument ( metavar "Item" <> help "Entry to open" )
 
 listParser :: Parser Context
 listParser = List <$> optional entryFilterParser
@@ -241,18 +210,14 @@ entryCodec = Entry
   <*> Toml.arrayOf Toml._Text "keywords"  .= keywords
   <*> Toml.arrayOf Toml._Text "projects"  .= projects
 
-data Entries where
-  Entries :: {entries :: ![Entry]} -> Entries
-  deriving (Show, Eq)
-
 entriesCodec :: TomlCodec [Entry]
 entriesCodec = Toml.list entryCodec "entry"
 
-dupes :: Eq a => [a] -> Either [a] [a]
-dupes xs = let xs' = nub xs
-          in if not (null $ xs \\ xs')
-            then Left [] -- add the inverse-intersection
-            else Right xs
+-- dupes :: Eq a => [a] -> Either [a] [a]
+-- dupes xs = let xs' = nub xs
+--           in if not (null $ xs \\ xs')
+--             then Left [] -- add the inverse-intersection
+--             else Right xs
 
 ensure :: FilePath -> IO ()
 ensure f = do ok <- doesFileExist f
@@ -267,7 +232,7 @@ getField query e = lookup query e.fields
 parseBib :: FilePath -> IO BibEntry
 parseBib fp = do
   res <- parseFromFile BibParse.file fp
-  es <- case res of
+  es  <- case res of
     Left err  -> fail (show err)
     Right es  -> pure es
   case es of
@@ -277,8 +242,8 @@ parseBib fp = do
 extractBib :: FilePath -> IO (Text, Text, Text)
 extractBib fp = do
   et <- parseBib fp
-  let key' = et.identifier
-      title = getField "title" et
+  let key'   = et.identifier
+      title  = getField "title" et
       author = getField "author" et
 
   (title', author') <- case (title, author) of
@@ -315,7 +280,7 @@ createEntry :: [Entry] -> FilePath -> Maybe FilePath -> AddSource -> IO Entry
 createEntry es base pdfSrc bib = do
   -- ensure pdfSrc
   bibSrc <- case bib of
-    FromBib r   -> pure r
+    FromRaw r   -> pure r
     FromDOI doi -> do
       bibEntry <- fetchBibFromDoi doi
       TIO.writeFile "temp_file.bib" bibEntry
@@ -536,6 +501,22 @@ main = do
     Extract query     -> extractEntry stmts query
     Edit              -> editEntry base
     Info query        -> infoEntry stmts query
+    Add pdfpath bibpath -> do
+      entry <- createEntry stmts base pdfpath bibpath
+      writeToToml base (stmts ++ [entry])
+      TIO.putStrLn $ "Added `" <> entry.key <> "` to library!"
+    Attatch query pdf -> do
+      (entry, stmts') <- case findEntryPair stmts query "__UNUSED__KEY__" of
+        Left msg -> die $ T.unpack msg
+        Right r  -> pure r
+
+      entry' <- case pdf of
+        FromRaw fp  -> pure $ entry{pdfPath = Just fp}
+        FromDOI _   -> die "Not implemented yet"
+
+      putStrLn "hello"
+      writeToToml base (entry':stmts')
+    
     Remove mode query -> do
       (entry', stmts') <- case findEntryPair stmts query query of
         Left msg -> die $ T.unpack msg
@@ -579,12 +560,7 @@ main = do
       writeToToml base (stmts' ++ [entry'])
       TIO.putStrLn $ "Renamed `" <> query <> "` to `"
                       <> nkey <> "` in the library!"
-    Add pdfpath bibpath -> do
-      entry <- createEntry stmts base pdfpath bibpath
-      writeToToml base (stmts ++ [entry])
-      TIO.putStrLn $ "Added `" <> entry.key <> "` to library!"
     where
       newToml = Toml.encode entriesCodec
       writeToToml base st = TIO.writeFile (base </> "meta.toml") (newToml st)
-
 
