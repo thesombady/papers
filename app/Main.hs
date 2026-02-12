@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 module Main where
 
-import Data.List ( nub, (\\), sortOn )
+import Data.List ( nub, sortOn )
 import Data.Maybe ( fromMaybe )
 
 import Data.Text ( Text )
@@ -14,7 +14,7 @@ import qualified Toml
 
 import System.Exit (die)
 import System.Info ( os )
-import System.FilePath ( (</>) )
+import System.FilePath ( (</>), takeExtension )
 import System.Environment ( lookupEnv )
 import System.Directory
   ( doesFileExist
@@ -62,10 +62,17 @@ data ExtractFilter
   | ExtractAll
   deriving Show
 
+data AddArgs = AddArgs
+  { aaOnlyBib :: Bool
+  , aaPdf     :: Maybe FilePath
+  , aaBib     :: Maybe FilePath
+  , aaDoi     :: Maybe DOI
+  } deriving Show
+
 data Context
   = List (Maybe Filter)
   | Open Text
-  | Add (Maybe FilePath) AddSource -- (pdf, bib, projects)
+  | Add AddArgs
   | Extract ExtractFilter
   | Edit
   | Attatch Text AddSource
@@ -79,11 +86,11 @@ optionParser =
   hsubparser
     ( command  "extract" (info extractParser (progDesc "Extract entries and cat to stdout"))
     <> command "get"     (info extractParser (progDesc "Extract entries and cat to stdout -- alias to extract"))
-    <> command "add"     (info addParser     (progDesc "Add a pdf-bibtex pair"))
+    <> command "add"     (info addParser     (progDesc "Add a entry to the library"))
     <> command "open"    (info openParser    (progDesc "Open a single entry in `$PDF_VIEWER`"))
     <> command "list"    (info listParser    (progDesc "List all entries"))
-    <> command "attatch" (info attatchParser (progDesc "Attatch a pdf to an existing entry"))
     <> command "ls"      (info listParser    (progDesc "List all entries -- alias for list"))
+    <> command "attatch" (info attatchParser (progDesc "Attatch a pdf to an existing entry"))
     <> command "edit"    (info editParser    (progDesc "Edit the metafile in $EDITOR or vi"))
     <> command "info"    (info infoParser'   (progDesc "Obtain information about the query result"))
     <> command "rename"  (info renameParser  (progDesc "Rename an entry"))
@@ -122,38 +129,42 @@ renameParser = Rename <$>
 
 attatchParser :: Parser Context
 attatchParser = Attatch <$>
-  strArgument ( metavar "Item"  <> help "Query to attatch to" )
-  <*> (
-      FromRaw <$> strArgument (metavar "PDF" <> help "PDF source file")
-  <|> FromDOI <$> option str (long "doi" <> metavar "DOI" <> help "Fetch PDF using DOI if possible"))
+  strArgument ( metavar "Item"  <> help "Query to attatch to" ) <*>
+    ( FromDOI <$> option str (long "doi" <> metavar "DOI" <> help "Fetch PDF using DOI if possible")
+    <|> FromRaw <$> strArgument (metavar "PDF" <> help "PDF source file"))
 
 editParser :: Parser Context
 editParser = pure Edit
 
 addParser :: Parser Context
-addParser = onlyBibMode <|> pdfMode
-  where
-    onlyBibMode :: Parser Context
-    onlyBibMode =
-      Add Nothing <$ onlyBibFlag <*> addSourceParser
+addParser = Add <$> addArgsParser
 
-    pdfMode :: Parser Context
-    pdfMode =
-      (Add . Just <$> strArgument ( metavar "PDF" <> help "PDF source file" ))
-        <*> addSourceParser
+addArgsParser :: Parser AddArgs
+addArgsParser = AddArgs
+  <$> switch
+      ( long "only-bib" <> short 'b'
+      <> help "Add an entry with no PDF (BibTeX required via BIB or --doi)" )
+  <*> optional (strArgument
+      ( metavar "PDF" <> help "PDF source file (omit with --only-bib)" ))
+  <*> optional (strArgument
+      ( metavar "BIB" <> help "BibTeX source file" ))
+  <*> optional (T.pack <$> strOption
+      ( long "doi" <> metavar "DOI" <> help "Fetch BibTeX from DOI" ))
 
-    onlyBibFlag :: Parser ()
-    onlyBibFlag =
-      flag' ()
-        ( long "only-bib"
-       <> short 'b'
-       <> help "Add an entry with no PDF (BibTeX required via FILE or --doi)"
-        )
+validateAddArgs :: AddArgs -> Either Text (Maybe FilePath, AddSource)
+validateAddArgs a = do
+  mpdf <- case (aaOnlyBib a, aaPdf a) of
+    (True,  _)        -> Right Nothing
+    (False, Just pdf) -> Right (Just pdf)
+    (False, Nothing)  -> Left "Missing PDF. Provide a PDF or use --only-bib."
 
-addSourceParser :: Parser AddSource
-addSourceParser =
-      FromRaw <$> strArgument (metavar "BIB" <> help "BibTeX source file")
-  <|> FromDOI <$> option str (long "doi" <> metavar "DOI" <> help "Fetch BibTeX from DOI")
+  src <- case (aaBib a, aaDoi a) of
+    (Just b, Nothing) -> Right (FromRaw b)
+    (Nothing, Just d) -> Right (FromDOI d)
+    (Nothing, Nothing) -> Left "Need either BIB or --doi DOI."
+    (Just _, Just _)   -> Left "Use either BIB or --doi DOI (not both)."
+
+  Right (mpdf, src)
 
 openParser :: Parser Context
 openParser = Open <$> strArgument ( metavar "Item" <> help "Entry to open" )
@@ -181,8 +192,6 @@ data Entry = Entry
 
 instance Eq Entry where
   (==) e1 e2 = e1.key == e2.key
-                -- || e1.pdfPath == e2.pdfPath
-                -- || e1.title == e2.title
 
 matchEntry :: Text -> Entry -> Bool
 matchEntry query e
@@ -213,16 +222,14 @@ entryCodec = Entry
 entriesCodec :: TomlCodec [Entry]
 entriesCodec = Toml.list entryCodec "entry"
 
--- dupes :: Eq a => [a] -> Either [a] [a]
--- dupes xs = let xs' = nub xs
---           in if not (null $ xs \\ xs')
---             then Left [] -- add the inverse-intersection
---             else Right xs
-
-ensure :: FilePath -> IO ()
-ensure f = do ok <- doesFileExist f
-              if ok then pure ()
-              else die  $ "File `" ++ f ++ "` does not exist"
+ensure :: Maybe FilePath -> IO ()
+ensure f = do
+  case f of
+    Nothing -> pure ()
+    Just f' -> do
+      ok <- doesFileExist f'
+      if ok then pure ()
+      else die  $ "File `" ++ f' ++ "` does not exist"
 
 type BibEntry = Bib.T
 
@@ -241,18 +248,17 @@ parseBib fp = do
 
 extractBib :: FilePath -> IO (Text, Text, Text)
 extractBib fp = do
-  et <- parseBib fp
-  let key'   = et.identifier
-      title  = getField "title" et
-      author = getField "author" et
+  bib <- parseBib fp
+  let key'   = bib.identifier
+      title  = getInfo "title" bib
+      author = getInfo "author" bib
 
-  (title', author') <- case (title, author) of
-      (Just t, Just a) -> pure (t, a)
-      (_, _)           -> die "Missing field/s (title or author)"
+  pure  ( T.pack key'
+        , title
+        , author)
+  where
+    getInfo field bib = trim $ T.pack $ fromMaybe "Unknown" (getField field bib)
 
-  pure  (T.pack key'
-        , trim (T.pack title')
-        , trim (T.pack author'))
 
 fetchBibFromDoi :: DOI -> IO Text
 fetchBibFromDoi doi = do
@@ -263,20 +269,15 @@ fetchBibFromDoi doi = do
     then die $ "FAILED to fetch BibTex from DOI: " <> T.unpack doi
     else pure (T.pack out)
 
-moveIntoLibrary :: FilePath -> FilePath -> FilePath -> Text -> IO (FilePath, FilePath)
-moveIntoLibrary base pdfSrc bibSrc key = do
-  ensure pdfSrc
-  ensure bibSrc
-
-  let pdfPath = pdfDest base key
-      bibPath = bibDest base key
-
-  renameFile pdfSrc pdfPath
-  renameFile bibSrc bibPath
-  pure (pdfPath, bibPath)
+moveIntoLibrary' :: FilePath -> FilePath -> Text -> IO FilePath
+moveIntoLibrary' base src key
+  = let out = if takeExtension out == ".pdf"
+              then pdfDest base key
+              else bibDest base key
+  in ensure (Just src) >> renameFile src out >> pure out
 
 -- Rewrite since we do the majority of the same things.
-createEntry :: [Entry] -> FilePath -> Maybe FilePath -> AddSource -> IO Entry
+createEntry :: [Entry] -> FilePath -> Maybe FilePath -> AddSource -> IO (Maybe Entry)
 createEntry es base pdfSrc bib = do
   -- ensure pdfSrc
   bibSrc <- case bib of
@@ -289,14 +290,18 @@ createEntry es base pdfSrc bib = do
   when (key' `elem` map key es) $ die
     $ T.unpack $ "Key already exists: " <> key'
     <> ". Consider renaming the key in `temp_file.bib`."
-  (pdfdest, bibdest) <- copyIntoLibrary base pdfSrc bibSrc key'
+  pdfdest <- copyIntoLibrary' base pdfSrc key'
+  bibdest <- copyIntoLibrary' base (Just bibSrc) key'
   case bib of
     FromDOI _ -> removeFile bibSrc
     _         -> pure ()
-  pure Entry
+
+  case bibdest of
+    Nothing       -> pure Nothing
+    Just bibdest' -> pure $ Just Entry
       { key = key'
       , pdfPath = pdfdest
-      , bibPath = bibdest
+      , bibPath = bibdest'
       , authors = author
       , title = title
       , keywords = []
@@ -308,20 +313,23 @@ openCmd
   | os == "darwin" = "open"
   | otherwise      = "xdg-open"
 
-openPdf :: FilePath -> IO ()
-openPdf fp = do
-  ensure fp
-  viewer <- lookupEnv "PDF_VIEWER"
-  let cmd = maybe openCmd id viewer
-  _ <- spawnProcess cmd [fp]
-  pure ()
+openPdf :: Entry -> IO ()
+openPdf e = do
+  case e.pdfPath of
+    Nothing -> die $ T.unpack $ "No affilieted pdf with " <> e.key
+    fp@(Just fp') -> do
+      ensure fp
+      viewer <- lookupEnv "PDF_VIEWER"
+      let cmd = fromMaybe openCmd viewer
+      _ <- spawnProcess cmd [fp']
+      pure ()
 
 openEntry :: [Entry] -> Text -> IO ()
 openEntry es query = do
   let matches = nub $ matchEntries es query
   case matches of
     []  -> die $ "No matches for: " <> T.unpack query
-    [e] -> maybe (die $ T.unpack $ "No affilieted pdf with" <> e.key) openPdf e.pdfPath
+    [e] -> openPdf e
     xs  -> die $ T.unpack $ "Multiple matches for: " <> query
                   <> "\nMatches: " <> T.intercalate ", " (map key xs)
 
@@ -362,12 +370,12 @@ listEntry es filter' = do
   let maxKey = maximum (1 : [T.length e.key | e <- es]) + 1
       es'    = sortOn (T.toCaseFold . key) (filterEntries es filter')
       rows   = map (formatRow maxKey 60 15 15) es'
-  TIO.putStrLn "  Reference list  "
+  TIO.putStrLn $ "  References (" <> T.pack (show (length es')) <> " entries)"
   TIO.putStrLn $
     padRight (maxKey + 2) "Key"
     <> padRight 62 "Title"
     <> padRight 17 "Projects"
-    <> padRight 1 "Keywords"
+    <> padRight 1  "Keywords"
   TIO.putStrLn $ T.replicate (maxKey + 60 + 15 * 2 + 8) "="
   TIO.putStrLn $ T.intercalate "\n" rows
 
@@ -416,58 +424,38 @@ infoEntry es query = do
   let fp = bibDest base match.key
   bib <- parseBib fp
 
-  let title    = getInfo "title" bib
-      author   = getInfo "author" bib
-      abstract = getField "abstract" bib
-      -- abstract = getInfo "abstract" bib -- getField "abstract" bib
-      fields   =  ["Type: " <> T.pack bib.entryType
-                  , "Title: " <> title
-                  , "Author: " <> author
-                  , T.pack $ "Abstract: " ++ fromMaybe "" abstract]
+  -- TODO: cleanup this
+  let abstract = getField "abstract"
+      fields bib' match'
+        = [ "Type: "      <> T.pack bib'.entryType
+          , "Title: "     <> getInfo "title" bib'
+          , "Author(s): " <> getInfo "author" bib'
+          , "Projects: "  <> T.intercalate ", " match'.projects
+          , "Keywords: "  <> T.intercalate ", " match'.keywords
+          , T.pack $ "Abstract: " ++ fromMaybe "" (abstract bib')]
 
-  TIO.putStrLn $ "Type: " <> T.pack bib.entryType
-  case match.projects of
-    (_:_) -> TIO.putStrLn $ "Projects: " <> T.intercalate ", " match.projects
-    []    -> pure ()
-
-  case match.keywords of
-    (_:_) -> TIO.putStrLn $ "Keywords: " <> T.intercalate ", " match.keywords
-    []    -> pure ()
-
-  TIO.putStrLn $ "Author: " <> author
-  TIO.putStrLn $ "Title: "  <> title
-  case abstract of
-    Nothing -> pure ()
-    Just abs'  -> do
-      TIO.putStrLn $ "Abstract: "
-        <> T.intercalate ".\n" (T.splitOn ". " (trim (T.pack abs')))
+  TIO.putStrLn $ T.unlines (fields bib match)
   where
-    getInfo field bib = trim $ T.pack $ fromMaybe "Uknown" (getField field bib)
+    getInfo field bib = trim $ T.pack $ fromMaybe "Unknown" (getField field bib)
 
 editEntry :: FilePath -> IO ()
-editEntry base = do
-  editor <- lookupEnv "EDITOR"
-  let fp = base </> "meta.toml"
-      cmd = maybe "vi" id editor
-  ensure fp
-  _ <- callCommand $ cmd ++ " " ++ fp
-  pure ()
+editEntry base = let fp  = base </> "meta.toml"
+                     cmd = fromMaybe "vi"
+                  in ensure (Just fp) >> lookupEnv "EDITOR"
+                    >>= (\ed -> callCommand $ cmd ed ++ " " ++ fp) >> pure ()
 
-copyIntoLibrary :: FilePath -> Maybe FilePath -> FilePath -> Text -> IO (Maybe FilePath, FilePath)
-copyIntoLibrary base pdfSrc bibSrc k = do
-  createDirectoryIfMissing True (pdfDir base)
-  createDirectoryIfMissing True (bibDir base)
+getPath :: FilePath -> Maybe FilePath -> Text -> Maybe FilePath
+getPath base fp key = case fp of
+  Nothing  -> Nothing
+  Just fp' -> if takeExtension fp' == ".pdf" then Just $ pdfDest base key
+              else Just $ bibDest base key
 
-  let bibOut = bibDest base k
-      pdfOut = pdfDest base k
-
-  copyFile bibSrc bibOut
-
-  case pdfSrc of
-    Nothing   -> pure (Nothing, bibOut)
-    Just p    -> do
-      copyFile p pdfOut
-      pure (Just pdfOut, bibOut)
+-- copy src to base </> dir </> key . extension
+copyIntoLibrary' :: FilePath -> Maybe FilePath -> Text -> IO (Maybe FilePath)
+copyIntoLibrary' base fp key =
+  case (fp, getPath base fp key) of
+    (Just in', fp'@(Just out')) -> ensure fp >> copyFile in' out' >> pure fp'
+    (_,_)                       -> pure Nothing
 
 findEntryPair :: [Entry] -> Text -> Text -> Either Text (Entry, [Entry])
 findEntryPair es query nkey =
@@ -486,9 +474,13 @@ findEntryPair es query nkey =
 
 main :: IO ()
 main = do
+
   home <- getHomeDirectory
   let base = home </> ".Papers"
-  ensure $ base </> "meta.toml"
+  createDirectoryIfMissing True (pdfDir base)
+  createDirectoryIfMissing True (bibDir base)
+  ensure $ Just (base </> "meta.toml")
+
   input <- TIO.readFile $ base </> "meta.toml"
   stmts <- case Toml.decode entriesCodec input of
                 Left msgs     -> die (T.unpack $ Toml.prettyTomlDecodeErrors msgs)
@@ -501,22 +493,33 @@ main = do
     Extract query     -> extractEntry stmts query
     Edit              -> editEntry base
     Info query        -> infoEntry stmts query
-    Add pdfpath bibpath -> do
-      entry <- createEntry stmts base pdfpath bibpath
-      writeToToml base (stmts ++ [entry])
-      TIO.putStrLn $ "Added `" <> entry.key <> "` to library!"
+
+    Add args -> do
+      (mpdf, src) <- case validateAddArgs args of
+        Left msg -> die (T.unpack msg)
+        Right x  -> pure x
+    
+      entry <- createEntry stmts base mpdf src
+      case entry of
+        Nothing     -> die "Could not add entry."
+        Just entry' -> do
+          writeToToml base (entry':stmts)
+          TIO.putStrLn $ "Added `" <> entry'.key <> "` to library!"
+
     Attatch query pdf -> do
       (entry, stmts') <- case findEntryPair stmts query "__UNUSED__KEY__" of
         Left msg -> die $ T.unpack msg
         Right r  -> pure r
 
       entry' <- case pdf of
-        FromRaw fp  -> pure $ entry{pdfPath = Just fp}
+        FromRaw fp  -> do
+          fp' <- copyIntoLibrary' base (Just fp) entry.key
+          pure $ entry{pdfPath = fp'}
         FromDOI _   -> die "Not implemented yet"
 
       putStrLn "hello"
       writeToToml base (entry':stmts')
-    
+
     Remove mode query -> do
       (entry', stmts') <- case findEntryPair stmts query query of
         Left msg -> die $ T.unpack msg
@@ -541,21 +544,20 @@ main = do
       (entry, stmts') <- case findEntryPair stmts query nkey of
                               Left msg -> die $ T.unpack msg
                               Right r  -> pure r
-      -- FIX:DONE: Right now we dont change the entry of the bibfile itself
-      -- and thus the extracted entry does contain the old key.
-      -- Below is a possible fix.
-      -- This should work
       bib <- parseBib entry.bibPath
       let bib' = bib { Bib.identifier = T.unpack nkey }
       TIO.writeFile entry.bibPath (T.pack $ BIBFormat.entry bib')
 
-      (pdfPath, bibPath) <- copyIntoLibrary base
-                        entry.pdfPath entry.bibPath nkey
+      pdfPath <- copyIntoLibrary' base entry.pdfPath nkey
+      bibPath <- copyIntoLibrary' base (Just entry.bibPath) nkey
 
-      let entry' = entry
-                    { key = nkey
-                    , pdfPath = pdfPath
-                    , bibPath = bibPath}
+      entry' <- case bibPath of
+                    Nothing -> die $ T.unpack $ "No Bib source for "
+                                      <> entry.key <> " -> "  <> nkey <> "."
+                    Just fp -> pure $ entry
+                                  { key = nkey
+                                  , pdfPath = pdfPath
+                                  , bibPath = fp}
 
       writeToToml base (stmts' ++ [entry'])
       TIO.putStrLn $ "Renamed `" <> query <> "` to `"
