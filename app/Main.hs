@@ -28,7 +28,7 @@ import System.Process
   ( spawnProcess
   , callCommand
   , readCreateProcess
-  , shell)
+  , proc)
 
 import Control.Monad ( when, unless )
 import Options.Applicative
@@ -42,15 +42,14 @@ type DOI = Text
 
 -- RELEASE: 0.5.0. Add `add --library pdfFolder library.bib`
 
+orDie :: Either Text a -> IO a
+orDie = either (die . T.unpack) pure
+
 data AddSource
   = FromRaw FilePath
   | FromDOI DOI
   deriving Show
 
--- papers get --project masters
--- papers get --author einstein
--- papers list --project masters
--- papers list --author einstein
 data Filter
   = ByAuthor  Text
   | ByProject Text
@@ -61,13 +60,6 @@ data ExtractFilter
   = ExtractFilter Filter
   | ExtractAll
   deriving Show
-
--- data AddArgs = AddArgs
---   { aaOnlyBib :: Bool
---   , aaPdf     :: Maybe FilePath
---   , aaBib     :: Maybe FilePath
---   , aaDoi     :: Maybe DOI
---   } deriving Show
 
 data AddArgs = AddArgs
   { aaOnlyBib' :: Bool
@@ -237,7 +229,6 @@ parseBib fp = parseFromFile BibParse.file fp >>= \case
     Right es -> case es of
             (e:_) -> pure e
             []    -> die ("No BibTex entries in " ++ fp)
-              
 
 extractBib :: FilePath -> IO (Text, Text, Text)
 extractBib fp = parseBib fp >>= \x -> pure $ getFields' x
@@ -247,20 +238,20 @@ extractBib fp = parseBib fp >>= \x -> pure $ getFields' x
 
 fetchBibFromDoi :: DOI -> IO Text
 fetchBibFromDoi doi = do
-  let cmd = "curl -fsSL -H 'Accept: application/x-bibtex' https://doi.org/"
-              <> T.unpack doi
-  readCreateProcess (shell cmd) "" >>=  \out -> if null out
+  let url  = "https://doi.org/" <> T.unpack doi
+      args = ["-fsSL", "-H", "Accept: application/x-bibtex", url]
+  readCreateProcess (proc "curl" args) "" >>= \out ->
+    if null out
       then die $ "FAILED to fetch BibTex from DOI: " <> T.unpack doi
       else pure (T.pack out)
 
 moveIntoLibrary' :: FilePath -> FilePath -> Text -> IO FilePath
 moveIntoLibrary' base src key
-  = let out = if takeExtension out == ".pdf"
-              then pdfDest base key
-              else bibDest base key
+  = let out =  if takeExtension src == ".pdf" then pdfDest base key else bibDest base key
   in ensure (Just src) >> renameFile src out >> pure out
 
 -- Rewrite since we do the majority of the same things.
+-- TODO: also createTempFile should exist, to avoid collissions
 createEntry :: [Entry] -> FilePath -> Maybe FilePath -> AddSource -> IO (Maybe Entry)
 createEntry es base pdfSrc bib = do
   -- ensure pdfSrc
@@ -319,9 +310,9 @@ openEntry es query = do
 
 truncateText :: Int -> Text -> Text
 truncateText n s
-  | n <= 1         = T.take n s
+  | n <= 1           = T.take n s
   | T.length s <= n  = s
-  | otherwise      = T.take (n - 1) s <> "…"
+  | otherwise        = T.take (n - 1) s <> "…"
 
 padRight :: Int -> Text -> Text
 padRight n t = t <> T.replicate (max 0 (n - T.length t)) " "
@@ -355,11 +346,10 @@ listEntry es filter' = do
       es'    = sortOn (T.toCaseFold . key) (filterEntries es filter')
       rows   = map (formatRow maxKey 60 15 15) es'
   TIO.putStrLn $ "  References (" <> T.pack (show (length es')) <> " entries)"
-  TIO.putStrLn $
-    padRight (maxKey + 2) "Key"
-    <> padRight 62 "Title"
-    <> padRight 17 "Projects"
-    <> padRight 1  "Keywords"
+  TIO.putStrLn $ padRight (maxKey + 2) "Key"
+                 <> padRight 62 "Title"
+                 <> padRight 17 "Projects"
+                 <> padRight 1  "Keywords"
   TIO.putStrLn $ T.replicate (maxKey + 60 + 15 * 2 + 8) "="
   TIO.putStrLn $ T.intercalate "\n" rows
 
@@ -381,11 +371,9 @@ extractEntry base es query = do
         ExtractFilter query' -> filterEntries es (Just query')
         ExtractAll    -> es
       files   = [ bibDest base entry.key | entry <- matches]
-  cats <- mapM TIO.readFile files
-  if not (null cats) then do
-    TIO.putStrLn $ T.intercalate "\n\n" cats
-  else
-    die "No entries found."
+  mapM TIO.readFile files >>= \cats' -> if not (null cats')
+                    then TIO.putStrLn $ T.intercalate "\n\n" cats'
+                    else die "No entries found"
 
 trim :: Text -> Text
 trim = T.unwords . T.words . T.replace "\n\t" ""
@@ -404,27 +392,23 @@ infoEntry es query = do
                     <> "\nMatches: " <> T.intercalate ", " (map key xs)
 
   let fp = bibDest base match.key
-  bib <- parseBib fp
+  parseBib fp >>= \bib -> TIO.putStrLn $ T.unlines (fields bib match)
 
-  -- TODO: cleanup this
-  let abstract = getField "abstract"
-      fields bib' match'
+  where
+    getInfo field bib' = trim $ T.pack $ fromMaybe "Unknown" (getField field bib')
+    fields bib' match'
         = [ "Type: "      <> T.pack bib'.entryType
           , "Title: "     <> getInfo "title" bib'
           , "Author(s): " <> getInfo "author" bib'
           , "Projects: "  <> T.intercalate ", " match'.projects
           , "Keywords: "  <> T.intercalate ", " match'.keywords
-          , T.pack $ "Abstract: " ++ fromMaybe "" (abstract bib')]
-
-  TIO.putStrLn $ T.unlines (fields bib match)
-  where
-    getInfo field bib = trim $ T.pack $ fromMaybe "Unknown" (getField field bib)
+          , T.pack $ "Abstract: " ++ fromMaybe "" (getField "abstract" bib')]
 
 editEntry :: FilePath -> IO ()
 editEntry base = let fp  = base </> "meta.toml"
-                     cmd = fromMaybe "vi"
-                  in ensure (Just fp) >> lookupEnv "EDITOR"
-                    >>= (\ed -> callCommand $ cmd ed ++ " " ++ fp) >> pure ()
+                  in ensure (Just fp) >> lookupEnv "EDITOR" >>=
+                    \ed -> callCommand $ fromMaybe "vi" ed ++ " " ++ fp
+
 
 getPath :: FilePath -> Maybe FilePath -> Text -> Maybe FilePath
 getPath base fp key = case fp of
@@ -455,15 +439,13 @@ findEntryPair es query nkey =
                         <> T.intercalate ", " (map key matches)
 
 attachEntry :: FilePath -> [Entry] -> Text -> AddSource -> IO [Entry]
-attachEntry base stmts query pdf = do
-  (entry, stmts') <- case findEntryPair stmts query "__UNUSED__KEY__" of
-    Left msg -> die $ T.unpack msg
-    Right r  -> pure r
-
-  case pdf of
-    FromDOI _   -> die "Not implemented yet"
-    FromRaw fp  -> copyIntoLibrary' base (Just fp) entry.key >>=
-                      (\fp' -> pure $ entry{pdfPath = fp'}:stmts')
+attachEntry base stmts query pdf
+  = case findEntryPair stmts query "__UNUSED__KEY__" of
+    Left msg              -> die $ T.unpack msg
+    Right (entry, stmts') -> case pdf of
+      FromDOI _   -> die "Not implemented yet"
+      FromRaw fp  -> copyIntoLibrary' base (Just fp) entry.key >>=
+                        (\fp' -> pure $ entry{pdfPath = fp'}:stmts')
 
 addEntry :: FilePath -> [Entry] -> AddArgs -> IO [Entry]
 addEntry base stmts args =
@@ -473,19 +455,25 @@ addEntry base stmts args =
   >>= maybe (die "Could not add entry.")
             (pure . (:stmts))
 
-removeEntry :: FilePath -> [Entry] -> Bool -> Text -> IO [Entry]
-removeEntry base stmts mode query = do
-  (entry', stmts') <- case findEntryPair stmts query query of
-    Left msg -> die $ T.unpack msg
-    Right r  -> pure r
+removeEntry :: [Entry] -> Bool -> Text -> IO [Entry]
+removeEntry stmts mode query = do
+  (entry', stmts') <- orDie (findEntryPair stmts query query)
 
-  resp <- if mode then pure True
-          else TIO.putStrLn ("Do you want to remove " <> entry'.key <> "? y/N")
-                >> getChar >>=  \r -> pure $ r `elem` ['n', 'N']
+  let askAction =
+        TIO.putStrLn ("Do you want to remove " <> entry'.key <> "? y/N")
+          >> ((`elem` ['y','Y']) <$> getChar)
 
-  (if resp then removeFile (pdfDest base entry'.key)
-            >> removeFile (bibDest base entry'.key)
-            >> pure stmts' else exitSuccess)
+      removeIfExists fp =
+        doesFileExist fp >>= \ok -> when ok (removeFile fp)
+
+      removeAction =
+        maybe (pure ()) removeIfExists entry'.pdfPath
+        >> removeIfExists entry'.bibPath
+        >> pure stmts'
+
+  ok <- if mode then pure True else askAction
+  if ok then removeAction else exitSuccess
+
 
 renameEntry :: FilePath -> [Entry] -> Text -> Text -> IO [Entry]
 renameEntry base stmts query nkey = do
@@ -507,19 +495,19 @@ renameEntry base stmts query nkey = do
 
 runPapers :: FilePath -> [Entry] -> Context -> IO ()
 runPapers base stmts ctx = case ctx of
-    List filter'      -> listEntry stmts filter'
-    Open query        -> openEntry stmts query
-    Extract query     -> extractEntry base stmts query
-    Edit              -> editEntry base
-    Info query        -> infoEntry stmts query
-    Add args          -> addEntry base stmts args >>= writeToToml
-                          >> TIO.putStrLn "Added to the library"
-    Attatch query pdf -> (attachEntry base stmts query pdf >>= writeToToml)
-                          >> TIO.putStrLn ("Attached pdf to " <> query)
-    Remove mode query -> removeEntry base stmts mode query >>= writeToToml
-                          >> TIO.putStrLn ("Removed" <> query)
-    Rename query nkey -> renameEntry base stmts query nkey >>= writeToToml
-                          >> TIO.putStrLn ("Renamed" <> query <> " to " <> nkey)
+  List filter'      -> listEntry stmts filter'
+  Open query        -> openEntry stmts query
+  Extract query     -> extractEntry base stmts query
+  Edit              -> editEntry base
+  Info query        -> infoEntry stmts query
+  Add args          -> addEntry base stmts args >>= writeToToml
+                        >> TIO.putStrLn "Added to the library"
+  Attatch query pdf -> (attachEntry base stmts query pdf >>= writeToToml)
+                        >> TIO.putStrLn ("Attached pdf to " <> query)
+  Remove mode query -> removeEntry stmts mode query >>= writeToToml
+                        >> TIO.putStrLn ("Removed " <> query)
+  Rename query nkey -> renameEntry base stmts query nkey >>= writeToToml
+                        >> TIO.putStrLn ("Renamed " <> query <> " to " <> nkey)
   where
     newToml = Toml.encode entriesCodec
     writeToToml st = TIO.writeFile (base </> "meta.toml") (newToml st)
