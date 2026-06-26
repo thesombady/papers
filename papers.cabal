@@ -79,6 +79,10 @@ executable papers
         bibtex,
         process,
         parsec,
+        bytestring,
+        aeson,
+        temporary,
+        terminal-size,
         tomland
 
     -- Directories containing source files.
