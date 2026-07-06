@@ -131,6 +131,14 @@ data AddArgs = AddArgs
     }
     deriving (Show)
 
+prettyPrintAdd :: AddArgs -> Text
+prettyPrintAdd AddArgs{aaPdf' = Nothing, aaBib' = (FromRaw fp)} = undefined
+prettyPrintAdd AddArgs{aaPdf' = Nothing, aaBib' = (FromDOI doi)} = undefined
+prettyPrintAdd AddArgs{aaPdf' = Nothing, aaBib' = (FromArXiv arxiv)} = undefined
+prettyPrintAdd AddArgs{aaPdf' = (Just fp'), aaBib' = (FromRaw fp)} = undefined
+prettyPrintAdd AddArgs{aaPdf' = (Just fp'), aaBib' = (FromDOI doi)} = undefined
+prettyPrintAdd AddArgs{aaPdf' = (Just fp'), aaBib' = (FromArXiv arxiv)} = undefined
+
 data Context
     = List (Maybe Filter)
     | Open Text
@@ -780,14 +788,17 @@ runPapers base stmts ctx = case ctx of
     Extract query -> extractEntry base stmts query
     Edit -> editEntry base
     Info query -> infoEntry stmts query
-    Add args ->
-        addEntry base stmts args
-            >>= writeToToml
-            >> TIO.putStrLn "Added to the library"
+    Add args -> do
+        entries <- addEntry base stmts args
+        case entries of
+            [] -> die "Should never reach this branch"
+            (entry : _) -> do
+                writeToToml entries
+                TIO.putStrLn ("Added `" <> key entry <> "` to the library")
     Fetch query ->
         fetchEntry base stmts query
             >>= writeToToml
-            >> TIO.putStrLn "Added to the library"
+            >> TIO.putStrLn ("Added` " <> T.pack base <> "`  to the library")
     Attatch query pdf ->
         (attachEntry base stmts query pdf >>= writeToToml)
             >> TIO.putStrLn ("Attached pdf to " <> query)
@@ -800,6 +811,8 @@ runPapers base stmts ctx = case ctx of
             >>= writeToToml
             >> TIO.putStrLn ("Renamed " <> query <> " to " <> nkey)
   where
+    tap :: (Monad m) => (a -> m b) -> a -> m a
+    tap f x = f x >> pure x
     newToml = Toml.encode entriesCodec
     writeToToml st = TIO.writeFile (base </> "meta.toml") (newToml st)
 
