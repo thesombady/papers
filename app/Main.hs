@@ -7,7 +7,7 @@
 module Main where
 
 import Data.List (nub, sortOn)
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -77,9 +77,15 @@ fetchOAPdfUrlFromUnpaywall doi = do
         Left err -> die ("Failed to parse Unpaywall JSON: " <> err)
         Right (UnpaywallResponse mBest) -> pure (mBest >>= urlForPdf)
 
+-- fetchEntryFromArXiv :: ArXiv -> IO (Maybe String)
+-- fetchEntryFromArXiv arxiv = do
+--     let url = "http://export.arxiv.org/api/query?search_query=all:" <> arxiv <> "&start=0&max_results=1"
+--     xml <- readCreateProcess (proc "curl" ["-fsSL", url]) ""
+--     case
+
 fetchPdf :: AddSource -> IO (Maybe String)
 fetchPdf (FromDOI doi) = fetchOAPdfUrlFromUnpaywall doi
-fetchPdf (FromArXiv arXiv) = undefined
+fetchPdf (FromArXiv _) = undefined
 fetchPdf (FromRaw _) = undefined
 
 downloadPdfTo :: Maybe String -> FilePath -> IO (Maybe FilePath)
@@ -130,14 +136,6 @@ data AddArgs = AddArgs
     , aaBib' :: AddSource
     }
     deriving (Show)
-
-prettyPrintAdd :: AddArgs -> Text
-prettyPrintAdd AddArgs{aaPdf' = Nothing, aaBib' = (FromRaw fp)} = undefined
-prettyPrintAdd AddArgs{aaPdf' = Nothing, aaBib' = (FromDOI doi)} = undefined
-prettyPrintAdd AddArgs{aaPdf' = Nothing, aaBib' = (FromArXiv arxiv)} = undefined
-prettyPrintAdd AddArgs{aaPdf' = (Just fp'), aaBib' = (FromRaw fp)} = undefined
-prettyPrintAdd AddArgs{aaPdf' = (Just fp'), aaBib' = (FromDOI doi)} = undefined
-prettyPrintAdd AddArgs{aaPdf' = (Just fp'), aaBib' = (FromArXiv arxiv)} = undefined
 
 data Context
     = List (Maybe Filter)
@@ -573,7 +571,7 @@ listEntry es filter' = do
                 padRight (keyW + 1) "Key"
                     <> padRight (titleW + 1) "Title"
                     <> padRight (projectW + 1) "Projects"
-                    <> padRight (keywordW) "Keywords"
+                    <> padRight keywordW "Keywords"
 
             TIO.putStrLn $ T.replicate (totalW + 2) "="
             TIO.putStrLn $ T.intercalate "\n" rows
@@ -795,10 +793,10 @@ runPapers base stmts ctx = case ctx of
             (entry : _) -> do
                 writeToToml entries
                 TIO.putStrLn ("Added `" <> key entry <> "` to the library")
-    Fetch query ->
-        fetchEntry base stmts query
-            >>= writeToToml
-            >> TIO.putStrLn ("Added` " <> T.pack base <> "`  to the library")
+    Fetch query -> do
+        entries <- fetchEntry base stmts query
+        writeToToml entries
+        TIO.putStrLn ("Added` " <> title (head entries) <> "`  to the library")
     Attatch query pdf ->
         (attachEntry base stmts query pdf >>= writeToToml)
             >> TIO.putStrLn ("Attached pdf to " <> query)
@@ -811,8 +809,6 @@ runPapers base stmts ctx = case ctx of
             >>= writeToToml
             >> TIO.putStrLn ("Renamed " <> query <> " to " <> nkey)
   where
-    tap :: (Monad m) => (a -> m b) -> a -> m a
-    tap f x = f x >> pure x
     newToml = Toml.encode entriesCodec
     writeToToml st = TIO.writeFile (base </> "meta.toml") (newToml st)
 
