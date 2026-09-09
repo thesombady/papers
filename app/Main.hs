@@ -655,32 +655,38 @@ copyIntoLibrary' base fp key =
         (Just in', fp'@(Just out')) -> ensure fp >> copyFile in' out' >> pure fp'
         (_, _) -> pure Nothing
 
-findEntryPair :: [Entry] -> Text -> Text -> Either Text (Entry, [Entry])
-findEntryPair es query nkey =
+findEntryPair :: [Entry] -> Text -> Text -> Bool -> Either Text (Entry, [Entry])
+findEntryPair es query nkey toRemove =
     let matches = nub $ matchEntries es query
         contained = any (\x -> x.key == nkey) es
-    in  case (matches, contained) of
-            ([], False) -> Left "No match"
-            ([], True) -> Left "No match, but key already exists"
-            ([match], False) -> Right (match, filter (/= match) es)
-            (_, False) ->
+    in  case (length matches, contained) of
+            (0, False) -> Left "No match"
+            (0, True) -> Left "No match, but key already exists"
+            (1, False) -> Right (head matches, filter (/= head matches) es)
+            (x, False) ->
                 Left $
-                    "Multiple matches for `"
+                    T.pack (show x)
+                        <> " matches for `"
                         <> query
                         <> "`: "
                         <> T.intercalate ", " (map key matches)
-            (_, True) ->
-                Left $
-                    "Key "
-                        <> nkey
-                        <> " already exists, and found multiple matches for `"
-                        <> query
-                        <> "`: "
-                        <> T.intercalate ", " (map key matches)
+            (x, True) ->
+                if toRemove && x == 1
+                    then Right (head matches, filter (/= head matches) es)
+                    else
+                        Left $
+                            "Key "
+                                <> nkey
+                                <> " already exists, and found "
+                                <> T.pack (show x)
+                                <> " matches for `"
+                                <> query
+                                <> "`: "
+                                <> T.intercalate ", " (map key matches)
 
 attachEntry :: FilePath -> [Entry] -> Text -> AddSource -> IO [Entry]
 attachEntry base stmts query pdf =
-    case findEntryPair stmts query "__UNUSED__KEY__" of
+    case findEntryPair stmts query "__UNUSED__KEY__" False of
         Left msg -> die $ T.unpack msg
         Right (entry, stmts') -> case pdf of
             FromArXiv _ -> die "Not implemented yet"
@@ -740,7 +746,7 @@ fetchEntry base stmts add = do
 
 removeEntry :: [Entry] -> Bool -> Text -> IO [Entry]
 removeEntry stmts mode query = do
-    (entry', stmts') <- orDie (findEntryPair stmts query query)
+    (entry', stmts') <- orDie (findEntryPair stmts query query True)
 
     let askAction =
             TIO.putStrLn ("Do you want to remove " <> entry'.key <> "? y/N")
@@ -759,7 +765,7 @@ removeEntry stmts mode query = do
 
 renameEntry :: FilePath -> [Entry] -> Text -> Text -> IO [Entry]
 renameEntry base stmts query nkey = do
-    (entry, stmts') <- case findEntryPair stmts query nkey of
+    (entry, stmts') <- case findEntryPair stmts query nkey False of
         Left msg -> die $ T.unpack msg
         Right r -> pure r
     bib <- parseBib entry.bibPath
